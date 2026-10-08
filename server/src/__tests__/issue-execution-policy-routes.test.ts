@@ -265,6 +265,44 @@ describe("issue execution policy routes", () => {
     mockAccessService.hasPermission.mockResolvedValue(false);
   });
 
+  // TES-2562: this exact body returned HTTP 200 and dropped the field, which is
+  // indistinguishable from success — an owner read the 200 and nearly reported
+  // two rows as date-gated when no monitor had been armed. The reject has to
+  // name the field that does work, or it trades a silent failure for a blind one.
+  it("rejects a top-level monitorNextCheckAt with a 4xx naming the nested monitor field", async () => {
+    const gatedIssue = {
+      id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      companyId: "company-1",
+      status: "todo",
+      reviewPolicy: "anyone",
+      assigneeAgentId: "33333333-3333-4333-8333-333333333333",
+      assigneeUserId: null,
+      createdByUserId: "local-board",
+      identifier: "PAP-2562",
+      title: "Date-gated re-measurement",
+      executionPolicy: null,
+      executionState: null,
+    };
+    mockIssueService.getById.mockResolvedValue(gatedIssue);
+    mockIssueService.getByIdForUpdate.mockResolvedValue(gatedIssue);
+
+    const res = await request(await createApp({
+      type: "agent",
+      agentId: "33333333-3333-4333-8333-333333333333",
+      companyId: "company-1",
+      runId: "55555555-5555-4555-8555-555555555555",
+    }))
+      .patch("/api/issues/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+      .send({ monitorNextCheckAt: "2026-10-21T15:00:00.000Z" });
+
+    expect(res.status).toBe(400);
+    const body = JSON.stringify(res.body);
+    expect(body).toContain("monitorNextCheckAt");
+    expect(body).toContain("executionPolicy.monitor.nextCheckAt");
+    // A rejected write must not have reached the update path at all.
+    expect(mockIssueService.update).not.toHaveBeenCalled();
+  });
+
   it("reauthorizes a terminal verdict against the review policy held under the update lock", async () => {
     const issue = {
       id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
