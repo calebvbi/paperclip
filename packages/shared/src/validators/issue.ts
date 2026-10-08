@@ -677,7 +677,37 @@ function withCreateIssueStatusDefault<T extends z.ZodRawShape>(
   }, schema);
 }
 
+/**
+ * `monitorNextCheckAt` and its siblings are derived columns. The server writes
+ * them from `executionPolicy.monitor`, which is also where the ownership check
+ * (assignee or board only) and the `scheduledBy` provenance live. A top-level
+ * key of the same name used to be dropped by the object parse, so a request
+ * that tried to arm a monitor that way got HTTP 200 and no monitor — a write
+ * that reads as applied and is not. Name the field that works instead of
+ * discarding the request silently.
+ */
+export const DERIVED_ISSUE_MONITOR_FIELD_HINT =
+  "cannot be set as a top-level field; it is derived from the issue monitor. " +
+  'Arm a monitor with executionPolicy.monitor.nextCheckAt (kind "external_service") ' +
+  "on an issue you are assigned; the scheduler only fires it while the issue is in_progress or in_review.";
+
+function derivedIssueMonitorField(field: string) {
+  return z
+    .never({ error: `${field} ${DERIVED_ISSUE_MONITOR_FIELD_HINT}` })
+    .optional();
+}
+
+const derivedIssueMonitorFieldsShape = {
+  monitorNextCheckAt: derivedIssueMonitorField("monitorNextCheckAt"),
+  monitorNotes: derivedIssueMonitorField("monitorNotes"),
+  monitorScheduledBy: derivedIssueMonitorField("monitorScheduledBy"),
+  monitorWakeRequestedAt: derivedIssueMonitorField("monitorWakeRequestedAt"),
+  monitorLastTriggeredAt: derivedIssueMonitorField("monitorLastTriggeredAt"),
+  monitorAttemptCount: derivedIssueMonitorField("monitorAttemptCount"),
+};
+
 const createIssueBaseSchema = z.object({
+  ...derivedIssueMonitorFieldsShape,
   projectId: z.string().guid().optional().nullable(),
   projectWorkspaceId: z.string().guid().optional().nullable(),
   goalId: z.string().guid().optional().nullable(),

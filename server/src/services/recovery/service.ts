@@ -30,6 +30,7 @@ import {
   requiresExecutionReconciliation,
   type IssueCommentMetadata,
   type IssueCommentPresentation,
+  type IssueUnblockDescriptor,
 } from "@paperclipai/shared";
 import {
   agents,
@@ -270,6 +271,26 @@ const HUMAN_GATED_RECOVERY_CAUSES = new Set<StrandedRecoveryCause>([
   "deliberate_wait_without_target",
 ]);
 
+/**
+ * Causes where one named agent owes one specific write before the issue can
+ * move. That is a named unblock owner and action, so the settle is `blocked`
+ * carrying an `unblockDescriptor` that says so.
+ *
+ * TES-2107 moved this cause to `todo` because `blocked` was then a hold with no
+ * blocker and no descriptor — clearable by nothing. That objection was about
+ * the missing descriptor, not about `blocked`: supplying one answers it, while
+ * `todo` asserts something false. A run that succeeded and shipped the work is
+ * not unstarted, and `todo` put two finished rows (TES-2555, TES-2556) back
+ * into the assignment pool as duplicate-work candidates (TES-2562).
+ *
+ * The owner stays assigned and the recovery action stays active, which is what
+ * keeps the row drainable: a recovery wake bypasses the ownership and
+ * in-progress dispatch gates, and `blocked` is not a terminal status.
+ */
+const OWNER_GATED_RECOVERY_CAUSES = new Set<StrandedRecoveryCause>([
+  SUCCESSFUL_RUN_MISSING_STATE_REASON,
+]);
+
 export function strandedRecoverySettledStatus(input: {
   cause: StrandedRecoveryCause;
   blockerIssueIds: readonly string[];
@@ -282,7 +303,41 @@ export function strandedRecoverySettledStatus(input: {
   // unpauses the agent or clears its budget. `todo` would promise a pickup
   // that nothing can deliver.
   if (!input.ownerCanRun) return "blocked";
+  if (OWNER_GATED_RECOVERY_CAUSES.has(input.cause)) return "blocked";
   return HUMAN_GATED_RECOVERY_CAUSES.has(input.cause) ? "blocked" : "todo";
+}
+
+/**
+ * The descriptor is what stops a `blocked` settle from reading as a dependency
+ * nothing can clear, and what the board's stale-count exclusions key on.
+ */
+export function strandedRecoveryUnblockDescriptor(input: {
+  cause: StrandedRecoveryCause;
+  blockerIssueIds: readonly string[];
+  sourceAssigneeAgentId: string | null;
+  ownerCanRun: boolean;
+}): IssueUnblockDescriptor | null {
+  // First-class blockers already name the exit; a descriptor would duplicate it.
+  if (input.blockerIssueIds.length > 0) return null;
+  if (!OWNER_GATED_RECOVERY_CAUSES.has(input.cause)) return null;
+  if (!input.ownerCanRun || !input.sourceAssigneeAgentId) {
+    return {
+      owner: "board",
+      action:
+        "This issue's last run succeeded without recording a disposition, and its owner cannot run. " +
+        "Restore the owner, or record the disposition directly: PATCH the issue with status done, cancelled, " +
+        "in_review plus a reviewer path, or blocked plus blockedByIssueIds.",
+    };
+  }
+  return {
+    owner: { agentId: input.sourceAssigneeAgentId },
+    action:
+      "Record this issue's disposition as a status write — a comment does not clear this. " +
+      'PATCH {"status":"done"} if the work shipped (name whatever will resurface a deferred check), ' +
+      '{"status":"blocked","unblockDescriptor":{...}} if it is waiting on a date or an external observation, ' +
+      '{"status":"blocked","blockedByIssueIds":[...]} if it is waiting on another issue, or ' +
+      '{"status":"in_review"} plus a human reviewer path.',
+  };
 }
 
 export function shouldRouteRecoveryToOriginalAgent(
@@ -3808,25 +3863,34 @@ export function recoveryService(
     const sourceAssignee = input.issue.assigneeAgentId
       ? await getAgent(input.issue.assigneeAgentId)
       : null;
+    const ownerCanRun =
+      sourceAssignee !== null &&
+      sourceAssignee.companyId === input.issue.companyId &&
+      (await isAgentInvokable(sourceAssignee)) &&
+      !(await isInvocationBudgetBlocked(input.issue, sourceAssignee.id));
     const settledStatus = strandedRecoverySettledStatus({
       cause: recoveryCause,
       blockerIssueIds: blockerIds,
-      ownerCanRun:
-        sourceAssignee !== null &&
-        sourceAssignee.companyId === input.issue.companyId &&
-        (await isAgentInvokable(sourceAssignee)) &&
-        !(await isInvocationBudgetBlocked(
-          input.issue,
-          sourceAssignee.id,
-        )),
+      ownerCanRun,
+    });
+    const settledUnblockDescriptor = strandedRecoveryUnblockDescriptor({
+      cause: recoveryCause,
+      blockerIssueIds: blockerIds,
+      sourceAssigneeAgentId: input.issue.assigneeAgentId,
+      ownerCanRun,
     });
     const updated = await issuesSvc.update(input.issue.id, {
       status: settledStatus,
       blockedByIssueIds: blockerIds,
+      ...(settledUnblockDescriptor
+        ? { unblockDescriptor: settledUnblockDescriptor }
+        : {}),
       // The run that held these locks is over. Leaving them set would make a
-      // task that reads `todo` refuse the next checkout until the stale-lock
-      // sweeper happens to run.
-      ...(settledStatus === "todo"
+      // task the original owner is expected to pick back up refuse the next
+      // checkout until the stale-lock sweeper happens to run — which is every
+      // settle that routes back to that owner, `todo` or owner-gated `blocked`.
+      ...(settledStatus === "todo" ||
+      OWNER_GATED_RECOVERY_CAUSES.has(recoveryCause)
         ? { executionRunId: null, checkoutRunId: null }
         : {}),
     });

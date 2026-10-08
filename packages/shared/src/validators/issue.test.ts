@@ -14,6 +14,55 @@ import {
 import { createAgentSchema } from "./agent.js";
 
 describe("issue validators", () => {
+  // TES-2562: a top-level `monitorNextCheckAt` used to be dropped by the object
+  // parse, so arming a monitor that way returned HTTP 200 with no monitor —
+  // a write indistinguishable from success. Reject it and name the field that
+  // works, on update and on create alike.
+  it("rejects derived monitor fields as top-level keys and names the nested form", () => {
+    for (const field of [
+      "monitorNextCheckAt",
+      "monitorNotes",
+      "monitorScheduledBy",
+      "monitorWakeRequestedAt",
+      "monitorLastTriggeredAt",
+      "monitorAttemptCount",
+    ]) {
+      const parsed = updateIssueSchema.safeParse({
+        [field]: "2026-10-21T15:00:00.000Z",
+      });
+      expect(parsed.success).toBe(false);
+      const message = parsed.success
+        ? ""
+        : (parsed.error.issues[0]?.message ?? "");
+      expect(message).toContain(field);
+      expect(message).toContain("executionPolicy.monitor.nextCheckAt");
+      expect(message).toContain("cannot be set as a top-level field");
+    }
+
+    const created = createIssueSchema.safeParse({
+      title: "Gate on a future measurement",
+      monitorNextCheckAt: "2026-10-21T15:00:00.000Z",
+    });
+    expect(created.success).toBe(false);
+  });
+
+  // The nested form is the one that works, so it must survive the same parse.
+  it("accepts the nested executionPolicy.monitor descriptor", () => {
+    const parsed = updateIssueSchema.safeParse({
+      status: "in_progress",
+      executionPolicy: {
+        monitor: {
+          kind: "external_service",
+          nextCheckAt: "2026-10-21T15:00:00.000Z",
+        },
+      },
+    });
+    expect(parsed.success).toBe(true);
+    expect(
+      parsed.success ? parsed.data.executionPolicy?.monitor?.nextCheckAt : null,
+    ).toBe("2026-10-21T15:00:00.000Z");
+  });
+
   it("uses the same bounded unique upload ID contract for comment and update requests", () => {
     const id = "9af8228f-0be7-45ae-a104-6fbe0af6f1d3";
     expect(

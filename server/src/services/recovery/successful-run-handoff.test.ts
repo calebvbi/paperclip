@@ -127,6 +127,74 @@ describe("successful run handoff decision", () => {
     });
   });
 
+  // TES-2562: the two rows this fixed were answered with accurate prose. The
+  // machinery reads status, not comment bodies, and never said so — so the
+  // instruction has to carry the literal write, not the word "disposition".
+  it("names the PATCH path and the accepted repair bodies, including the date-gate shape", () => {
+    const instruction = buildSuccessfulRunHandoffInstruction({
+      issueId: "22222222-2222-4222-8222-222222222222",
+      issueIdentifier: "PAP-2562",
+      issueTitle: "Re-measure after the gate date",
+      issueDescription: null,
+      sourceRunId: "run-evidence",
+      finalReport: "Shipped; one AC waits on a 2026-10-21 re-measurement.",
+      nextAction: null,
+      detectedProgressSummary: null,
+    });
+
+    expect(instruction).toContain(
+      "PATCH /api/issues/22222222-2222-4222-8222-222222222222",
+    );
+    expect(instruction).toContain("Prose in a comment does not satisfy this handoff");
+    expect(instruction).toContain('`{"status":"done"}`');
+    // The date-gate repair is the shape nobody could find from the old prompt.
+    expect(instruction).toContain('"unblockDescriptor"');
+    expect(instruction).toContain('"status":"blocked"');
+    expect(instruction).toContain("rejected unless the same body also sets");
+    // The monitor form is the only way to arm an automatic wake, and the
+    // top-level field name that silently did nothing must not be suggested.
+    expect(instruction).toContain('"monitor"');
+    expect(instruction).toContain("There is no top-level `monitorNextCheckAt` field.");
+  });
+
+  it("carries the accepted repair shapes in both notices", () => {
+    const noticeIssue = { ...issue, status: "in_progress" };
+    const required = buildSuccessfulRunHandoffRequiredNotice({
+      issue: noticeIssue,
+      run,
+      agent: { id: "agent-1", name: "Coder" },
+      detectedProgressSummary: "opened a PR",
+    });
+    const exhausted = buildSuccessfulRunHandoffExhaustedNotice({
+      issue: noticeIssue,
+      sourceRun: run,
+      correctiveRun: run,
+      sourceAssignee: { id: "agent-1", name: "Coder" },
+      recoveryIssue: null,
+      recoveryActionId: "action-1",
+      recoveryOwner: null,
+      latestIssueStatus: "in_progress",
+      latestHandoffRunStatus: "succeeded",
+      missingDisposition: "clear_next_step",
+    });
+
+    for (const notice of [required, exhausted]) {
+      const rows = notice.metadata.sections.flatMap((section) => section.rows);
+      const codeRow = rows.find((row) => row.type === "code");
+      expect(codeRow).toBeDefined();
+      expect(codeRow && "code" in codeRow ? codeRow.code : "").toContain(
+        '"unblockDescriptor"',
+      );
+      expect(
+        rows.some(
+          (row) =>
+            row.type === "key_value" &&
+            row.value.includes("a comment alone does not resolve this"),
+        ),
+      ).toBe(true);
+    }
+  });
+
   it.each([
     "**Blocked** — The benchmark target is not mounted…",
     "coqc … is not installed, so local compilation could not run",
@@ -134,6 +202,7 @@ describe("successful run handoff decision", () => {
     "Verification summary: 0/3 verifiers passed",
   ])("quotes the source run report without classifying it: %s", (finalReport) => {
     const instruction = buildSuccessfulRunHandoffInstruction({
+      issueId: "11111111-1111-4111-8111-111111111111",
       issueIdentifier: "PAP-15270",
       issueTitle: "Prevent false completion",
       issueDescription: "Use the agent's own report to choose the disposition.",
@@ -153,6 +222,7 @@ describe("successful run handoff decision", () => {
     const description = `description-start-${"d".repeat(1300)}-description-end`;
     const finalReport = `report-start-${"r".repeat(2100)}-report-end`;
     const instruction = buildSuccessfulRunHandoffInstruction({
+      issueId: "11111111-1111-4111-8111-111111111111",
       issueIdentifier: "PAP-1",
       issueTitle: "Finish backend handoff",
       issueDescription: description,
@@ -171,6 +241,7 @@ describe("successful run handoff decision", () => {
 
   it("uses detected progress as the quoted fallback when the final report is empty", () => {
     const instruction = buildSuccessfulRunHandoffInstruction({
+      issueId: "11111111-1111-4111-8111-111111111111",
       issueIdentifier: "PAP-1",
       issueTitle: "Finish backend handoff",
       issueDescription: null,
@@ -192,6 +263,7 @@ describe("successful run handoff decision", () => {
       "````",
     ].join("\n");
     const instruction = buildSuccessfulRunHandoffInstruction({
+      issueId: "11111111-1111-4111-8111-111111111111",
       issueIdentifier: "PAP-1",
       issueTitle: "Finish backend handoff",
       issueDescription: null,
@@ -207,6 +279,7 @@ describe("successful run handoff decision", () => {
 
   it("strips control characters and collapses the issue title to a single line", () => {
     const instruction = buildSuccessfulRunHandoffInstruction({
+      issueId: "11111111-1111-4111-8111-111111111111",
       issueIdentifier: "PAP-1",
       issueTitle: "Finish backend\nhandoff\u0000\u001b[31m now",
       issueDescription: "Line one.\r\nLine two.\u0007",

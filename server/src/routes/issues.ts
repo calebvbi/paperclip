@@ -1038,21 +1038,14 @@ function hasExecutionParticipant(value: unknown) {
   return false;
 }
 
+// A request can only arm a monitor through `executionPolicy.monitor`; a
+// top-level `monitorNextCheckAt` is rejected by the issue schema, so the patch
+// never carries one of its own to consider here.
 function hasScheduledMonitor(input: {
   existingMonitorNextCheckAt?: Date | null;
-  patchMonitorNextCheckAt?: unknown;
   executionPolicy?: unknown;
 }) {
-  if (
-    input.patchMonitorNextCheckAt instanceof Date &&
-    !Number.isNaN(input.patchMonitorNextCheckAt.getTime())
-  )
-    return true;
-  if (
-    input.patchMonitorNextCheckAt === undefined &&
-    input.existingMonitorNextCheckAt
-  )
-    return true;
+  if (input.existingMonitorNextCheckAt) return true;
   const policy = normalizeIssueExecutionPolicy(input.executionPolicy ?? null);
   return Boolean(policy?.monitor?.nextCheckAt);
 }
@@ -4715,7 +4708,6 @@ export function issueRoutes(
     if (
       hasScheduledMonitor({
         existingMonitorNextCheckAt: input.existing.monitorNextCheckAt ?? null,
-        patchMonitorNextCheckAt: input.updateFields.monitorNextCheckAt,
         executionPolicy: nextExecutionPolicy,
       })
     )

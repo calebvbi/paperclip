@@ -1522,11 +1522,14 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     expect(comments[0]?.presentation).toMatchObject({ kind: "system_notice", tone: "danger" });
   });
 
-  // TES-2107: a run that ends without a disposition leaves the work un-run, not
-  // held. Settling it to `blocked` produced a hold with no blocker and no
-  // unblock descriptor — indistinguishable from a real dependency, clearable by
-  // nothing, and invisible to its owner's next heartbeat.
-  it("returns a successful run's issue to todo when its missing disposition cannot be recovered", async () => {
+  // TES-2107 settled this cause to `todo` because `blocked` was then a hold
+  // with no blocker and no unblock descriptor — clearable by nothing.
+  // TES-2562: `todo` is the worse of the two errors. It claims nobody has
+  // started, which is false after a run that shipped the work, and it put two
+  // finished rows back into the assignment pool as duplicate-work candidates.
+  // The settle is `blocked` carrying the descriptor TES-2107 found missing: one
+  // named owner, one named write.
+  it("blocks a successful run's issue with an owner-named unblock descriptor when its missing disposition cannot be recovered", async () => {
     const { companyId, coderId, sourceIssue } = await seedCompany();
     const sourceRunId = randomUUID();
     const correctiveRunId = randomUUID();
@@ -1561,22 +1564,26 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     });
 
     const [settled] = await db.select().from(issues).where(eq(issues.id, sourceIssue.id));
-    expect(settled?.status).toBe("todo");
+    expect(settled?.status).toBe("blocked");
     // The assignment is what makes it drainable: only the assignee may clear an
     // active recovery action, so losing the owner would strand it again.
     expect(settled?.assigneeAgentId).toBe(coderId);
-    // The run that held these is over; a `todo` issue that still carries them
-    // refuses the next checkout.
+    // The run that held these is over; an issue its owner is expected to pick
+    // back up refuses the next checkout while they are still set.
     expect(settled?.executionRunId).toBeNull();
     expect(settled?.checkoutRunId).toBeNull();
-    expect(settled?.unblockDescriptor ?? null).toBeNull();
+    // No first-class blocker exists, so the descriptor is the only thing that
+    // distinguishes this from a dependency nothing can clear — and it is what
+    // the board's stale-count exclusions key on.
+    expect(settled?.unblockDescriptor?.owner).toEqual({ agentId: coderId });
+    expect(settled?.unblockDescriptor?.action).toContain("status write");
 
     const [escalation] = await db
       .select()
       .from(activityLog)
       .where(and(eq(activityLog.entityId, sourceIssue.id), eq(activityLog.action, "issue.successful_run_handoff_escalated")));
     expect(escalation?.details).toMatchObject({
-      status: "todo",
+      status: "blocked",
       source: "recovery.reconcile_successful_run_handoff_missing_state",
     });
 
